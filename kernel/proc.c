@@ -15,6 +15,9 @@ struct proc *initproc;
 int nextpid = 1;
 struct spinlock pid_lock;
 
+// Para lottery scheduling - generador de números pseudo-aleatorios simple
+static uint32 seed = 1;
+
 extern void forkret(void);
 static void freeproc(struct proc *p);
 
@@ -124,6 +127,8 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->tickets = 100;  // Initialize with 100 lottery tickets
+  p->cpu_slices = 0; // Initialize CPU slice counter
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -287,6 +292,10 @@ kfork(void)
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
+  // Copy tickets from parent to child
+  np->tickets = p->tickets;
+  np->cpu_slices = 0; // Initialize CPU slice counter for child
+
   pid = np->pid;
 
   release(&np->lock);
@@ -412,6 +421,14 @@ kwait(uint64 addr)
 }
 
 // Per-CPU process scheduler.
+// Generador de números pseudo-aleatorios simple para lottery scheduling
+static uint32
+random(void)
+{
+  seed = seed * 1103515245 + 12345;
+  return (seed >> 16) & 0x7fff;
+}
+
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
 //  - choose a process to run.
@@ -434,26 +451,58 @@ scheduler(void)
     intr_on();
     intr_off();
 
+    // LOTTERY SCHEDULING
+    // Paso 1: Calcular total de tickets de procesos RUNNABLE
+    // Asegurar robustez: todos los procesos deben tener al menos 1 ticket
+    int total = 0;
+    for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if(p->state == RUNNABLE) {
+        // Robustez: asegurar que el proceso tenga al menos 1 ticket
+        if(p->tickets <= 0) {
+          p->tickets = 1;
+        }
+        total += p->tickets;
+      }
+      release(&p->lock);
+    }
+    
+    // Si no hay procesos ejecutables, esperar
+    if(total == 0) {
+      asm volatile("wfi");
+      continue;
+    }
+
+    // Paso 2: Generar número aleatorio en [1, total]
+    int r = (random() % total) + 1;
+
+    // Paso 3: Recorrer procesos acumulando tickets hasta que acc >= r
+    int acc = 0;
     int found = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+        acc += p->tickets;
+        if(acc >= r) {
+          // Proceso seleccionado por la lotería
+          p->cpu_slices++; // Increment CPU slice counter
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+          found = 1;
+          release(&p->lock);
+          break;
+        }
       }
       release(&p->lock);
     }
+    
     if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
+      // Fallback - esto no debería pasar si el algoritmo está correcto
       asm volatile("wfi");
     }
   }

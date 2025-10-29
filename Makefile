@@ -142,8 +142,14 @@ UPROGS=\
 	$U/_logstress\
 	$U/_forphan\
 	$U/_dorphan\
-	$U/_test_getppid\
+	$U/_tickettest\
+	$U/_lotterytest\
+	$U/_cpuslicetest\
+	$U/_demo\
+	$U/_robusttest\
+#	$U/_test_getppid\
 	$U/_getancestor\
+	
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
